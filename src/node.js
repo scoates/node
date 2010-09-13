@@ -3,6 +3,7 @@
 process.global.process = process;
 process.global.global = process.global;
 global.GLOBAL = global;
+global.root = global;
 
 /** deprecation errors ************************************************/
 
@@ -46,9 +47,23 @@ process.evalcx = function () {
 var nextTickQueue = [];
 
 process._tickCallback = function () {
-  for (var l = nextTickQueue.length; l; l--) {
-    nextTickQueue.shift()();
+  var l = nextTickQueue.length;
+  if (l === 0) return;
+
+  try {
+    for (var i = 0; i < l; i++) {
+      nextTickQueue[i]();
+    }
   }
+  catch(e) {
+    nextTickQueue.splice(0, i+1);
+    if (i+1 < l) {
+      process._needTickCallback();
+    }
+    throw e;
+  }
+
+  nextTickQueue.splice(0, l);
 };
 
 process.nextTick = function (callback) {
@@ -60,7 +75,7 @@ process.nextTick = function (callback) {
 // Module System
 var module = (function () {
   var exports = {};
-  // Set the environ variable NODE_MODULE_CONTEXT=1 to make node load all
+  // Set the environ variable NODE_MODULE_CONTEXTS=1 to make node load all
   // modules in thier own context.
   var contextLoad = false;
   if (parseInt(process.env["NODE_MODULE_CONTEXTS"]) > 0) contextLoad = true;
@@ -116,13 +131,6 @@ var module = (function () {
     return loadNative(id).exports;
   }
 
-  // Event
-
-  var eventsFn = process.compile("(function (exports) {" + natives.events + "\n})",
-                                 "events");
-  var eventsModule = createInternalModule('events', eventsFn);
-  var events = eventsModule.exports;
-
 
   // Modules
 
@@ -150,9 +158,36 @@ var module = (function () {
 
   var moduleNativeExtensions = ['js', 'node'];
 
+  // Which files to traverse while finding id? Returns generator function.
+  function traverser (id, dirs) {
+    var head = [], inDir = [], _dirs = dirs.slice();
+    return function next () {
+      var result = head.shift();
+      if (result) { return result; }
+
+      var gen = inDir.shift();
+      if (gen) { head = gen(); return next(); }
+
+      var dir = _dirs.shift();
+      if (dir !== undefined) {
+        function direct (ext) { return path.join(dir, id + '.' + ext); }
+        function index (ext) { return path.join(dir, id, 'index.' + ext); }
+        var userExts = Object.keys(extensionCache);
+        inDir = [
+          function () { return moduleNativeExtensions.map(direct); },
+          function () { return userExts.map(direct); },
+          function () { return moduleNativeExtensions.map(index); },
+          function () { return userExts.map(index); }
+        ];
+        head = [path.join(dir, id)];
+        return next();
+      }
+    };
+  }
+
   /* Sync unless callback given */
   function findModulePath (id, dirs, callback) {
-    process.assert(dirs.constructor == Array);
+    process.assert(Array.isArray(dirs));
 
     if (/^https?:\/\//.exec(id)) {
       if (callback) {
@@ -163,102 +198,53 @@ var module = (function () {
       return;
     }
 
-    if (dirs.length == 0) {
-      if (callback) {
-        callback();
-      } else {
-        return; // sync returns null
-      }
-    }
-
-    var dir = dirs[0];
-    var rest = dirs.slice(1, dirs.length);
-
-    if (id.charAt(0) == '/') {
-      dir = '';
-      rest = [];
-    }
-
-    var ext, locDirect = [], locIndex = [];
-    var extensions = moduleNativeExtensions.concat(Object.keys(extensionCache));
-
-    for (var i = 0, l = extensions.length; i < l; i++) {
-      ext = extensions[i];
-      locDirect.push(path.join(dir, id + '.' + ext));
-      locIndex.push(path.join(dir, id, 'index.' + ext));
-    }
-
-    var locations = [path.join(dir, id)].concat(locDirect).concat(locIndex);
+    var nextLoc = traverser(id, id.charAt(0) === '/' ? [''] : dirs);
 
     var fs = requireNative('fs');
 
     function searchLocations () {
-      var location = locations.shift();
-
-      if (!location && rest.length > 0) {
-        return findModulePath(id, rest);
-      } else if (location) {
-        try {
-          var stats = fs.statSync(location);
-          if (stats && !stats.isDirectory()) return location;
-        } catch(e) {}
-        return searchLocations();
-      } else {
-        return false;
+      var location, stats;
+      while (location = nextLoc()) {
+        try { stats = fs.statSync(location); } catch(e) { continue; }
+        if (stats && !stats.isDirectory()) return location;
       }
+      return false;
     }
 
     function searchLocationsAsync (cb) {
-      var location = locations.shift();
+      var location = nextLoc();
 
-      if (!location && rest.length > 0) {
-        findModulePath(id, rest, cb);
-      } else if (location) {
-        fs.stat(location, function (err, stats) {
-          if (stats && !stats.isDirectory()) {
-            cb(location);
-          } else {
-            searchLocationsAsync(cb);
-          }
-        });
-      } else {
-        cb(false);
-      }
+      if (!location) { cb(false); return; }
+
+      fs.stat(location, function (err, stats) {
+        if (stats && !stats.isDirectory()) { cb(location); }
+        else { searchLocationsAsync(cb); }
+      });
     }
 
-    if (callback) {
-      return searchLocationsAsync(callback);
-    } else {
-      return searchLocations();
-    }
+    return callback ? searchLocationsAsync(callback) : searchLocations();
   }
 
 
   // sync - no i/o performed
   function resolveModulePath(request, parent) {
-    var id, paths;
-    if (request.charAt(0) == "." && (request.charAt(1) == "/" || request.charAt(1) == ".")) {
-      // Relative request
+    var start = request.substring(0, 2);
+    if (start !== "./" && start !== "..") { return [request, modulePaths]; }
 
-      var exts = moduleNativeExtensions.concat(Object.keys(extensionCache));
-
-      var parentIdPath = path.dirname(parent.id +
-        (path.basename(parent.filename).match(new RegExp('^index\\.(' + exts.join('|') + ')$')) ? "/." : ""));
+    // Relative request
+    var exts = moduleNativeExtensions.concat(Object.keys(extensionCache)),
+      indexRE = new RegExp('^index\\.(' + exts.join('|') + ')$'),
+      // XXX dangerous code: ^^^ what if exts contained some RE control chars?
+      isIndex = path.basename(parent.filename).match(indexRE),
+      parentIdPath = isIndex ? parent.id : path.dirname(parent.id),
       id = path.join(parentIdPath, request);
-      // make sure require('./path') and require('path') get distinct ids, even
-      // when called from the toplevel js file
-      if (parentIdPath == '.' && ! id.match(new RegExp('/'))) {
-        id = './' + id;
-      }
-      debug("RELATIVE: requested:" + request + " set ID to: "+id+" from "+parent.id);
-      paths = [path.dirname(parent.filename)];
-    } else {
-      id = request;
-      // debug("ABSOLUTE: id="+id);
-      paths = modulePaths;
+    // make sure require('./path') and require('path') get distinct ids, even
+    // when called from the toplevel js file
+    if (parentIdPath === '.' && id.indexOf('/') === -1) {
+      id = './' + id;
     }
-
-    return [id, paths];
+    debug("RELATIVE: requested:" + request + " set ID to: "+id+" from "+parent.id);
+    return [id, [path.dirname(parent.filename)]];
   }
 
 
@@ -412,6 +398,11 @@ var module = (function () {
       content = extensionCache[ext](content);
     }
 
+    if ("string" !== typeof content) {
+      self.exports = content;
+      return;
+    }
+
     function requireAsync (url, cb) {
       loadModule(url, self, cb);
     }
@@ -428,7 +419,7 @@ var module = (function () {
     var dirname = path.dirname(filename);
 
     if (contextLoad) {
-      if (!Script) Script = Script = process.binding('evals').Script;
+      if (!Script) Script = process.binding('evals').Script;
 
       if (self.id !== ".") {
         debug('load submodule');
@@ -442,7 +433,8 @@ var module = (function () {
         sandbox.__filename  = filename;
         sandbox.__dirname   = dirname;
         sandbox.module      = self;
-        sandbox.root        = global;
+        sandbox.global      = sandbox;
+        sandbox.root        = root;
 
         Script.runInNewContext(content, sandbox, filename);
 
@@ -454,25 +446,20 @@ var module = (function () {
         global.__filename = filename;
         global.__dirname  = dirname;
         global.module     = self;
-        global.root       = global;
         Script.runInThisContext(content, filename);
       }
 
     } else {
-      if ('string' === typeof content) {
-        // create wrapper function
-        var wrapper = "(function (exports, require, module, __filename, __dirname) { "
-                    + content
-                    + "\n});";
+      // create wrapper function
+      var wrapper = "(function (exports, require, module, __filename, __dirname) { "
+                  + content
+                  + "\n});";
 
-        var compiledWrapper = process.compile(wrapper, filename);
-        if (filename === process.argv[1] && global.v8debug) {
-          global.v8debug.Debug.setBreakPoint(compiledWrapper, 0, 0);
-        }
-        compiledWrapper.apply(self.exports, [self.exports, require, self, filename, dirname]);
-      } else {
-        self.exports = content;
+      var compiledWrapper = process.compile(wrapper, filename);
+      if (filename === process.argv[1] && global.v8debug) {
+        global.v8debug.Debug.setBreakPoint(compiledWrapper, 0, 0);
       }
+      compiledWrapper.apply(self.exports, [self.exports, require, self, filename, dirname]);
     }
   };
 
@@ -537,6 +524,11 @@ var module = (function () {
 
   return exports;
 })();
+
+
+// Load events module in order to access prototype elements on process like
+// process.addListener.
+var events = module.requireNative('events');
 
 
 // Signal Handlers
@@ -605,7 +597,7 @@ global.setTimeout = function (callback, after) {
 global.setInterval = function (callback, repeat) {
   var timer = new process.Timer();
   addTimerListener.apply(timer, arguments);
-  timer.start(repeat, repeat);
+  timer.start(repeat, repeat ? repeat : 1);
   return timer;
 };
 
@@ -757,7 +749,11 @@ if (process.argv[1]) {
     process.argv[1] = path.join(cwd, process.argv[1]);
   }
 
-  module.runMain();
+  // REMOVEME: nextTick should not be necessary. This hack to get
+  // test/simple/test-exception-handler2.js working.
+  process.nextTick(function() {
+    module.runMain();
+  });
 } else {
   // No arguments, run the repl
   var repl = module.requireNative('repl');

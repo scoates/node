@@ -218,7 +218,7 @@ is emitted. These functions are called _listeners_.
 All EventEmitters emit the event `'newListener'` when new listeners are
 added.
 
-When an EventEmitter experiences an error, the typical action is to emit an
+When an `EventEmitter` experiences an error, the typical action is to emit an
 `'error'` event.  Error events are special--if there is no handler for them
 they will print a stack trace and exit the program.
 
@@ -750,6 +750,10 @@ The PID of the process.
 
     console.log('This process is pid ' + process.pid);
 
+### process.title
+
+Getter/setter to set what is displayed in 'ps'.
+
 
 ### process.platform
 
@@ -856,8 +860,9 @@ Experimental
 
 Read the data from `readableStream` and send it to the `writableStream`.
 When `writeableStream.write(data)` returns `false` `readableStream` will be
-paused until the `drain` event occurs on the `writableStream`. `callback` is
-called when `writableStream` is closed.
+paused until the `drain` event occurs on the `writableStream`. `callback` gets
+an error as its only argument and is called when `writableStream` is closed or
+when an error occurs.
 
 
 ## Timers
@@ -896,7 +901,7 @@ To create a child process use `require('child_process').spawn()`.
 Child processes always have three streams associated with them. `child.stdin`,
 `child.stdout`, and `child.stderr`.
 
-`ChildProcess` is an EventEmitter.
+`ChildProcess` is an `EventEmitter`.
 
 ### Event:  'exit'
 
@@ -1603,6 +1608,12 @@ An example to read the last 10 bytes of a file which is 100 bytes long:
 
 `WriteStream` is a `Writable Stream`.
 
+### Event: 'open'
+
+`function (fd) { }`
+
+ `fd` is the file descriptor used by the WriteStream.
+
 ### fs.createWriteStream(path, [options])
 
 Returns a new WriteStream object (See `Writable Stream`).
@@ -1644,7 +1655,7 @@ HTTPS is supported if OpenSSL is available on the underlying platform.
 
 ## http.Server
 
-This is an EventEmitter with the following events:
+This is an `EventEmitter` with the following events:
 
 ### Event: 'request'
 
@@ -1696,13 +1707,9 @@ sent to the server on that socket.
 
 If a client connection emits an 'error' event - it will forwarded here.
 
-### http.createServer(requestListener, [options])
+### http.createServer(requestListener)
 
 Returns a new web server object.
-
-The `options` argument is optional. The
-`options` argument accepts the same values as the
-options argument for `net.Server`.
 
 The `requestListener` is a function which is automatically
 added to the `'request'` event.
@@ -1743,7 +1750,7 @@ Stops the server from accepting new connections.
 This object is created internally by a HTTP server--not by
 the user--and passed as the first argument to a `'request'` listener.
 
-This is an EventEmitter with the following events:
+This is an `EventEmitter` with the following events:
 
 ### Event: 'data'
 
@@ -1868,7 +1875,7 @@ Example:
 This method must only be called once on a message and it must
 be called before `response.end()` is called.
 
-### response.write(chunk, encoding='ascii')
+### response.write(chunk, encoding='utf8')
 
 This method must be called after `writeHead` was
 called. It sends a chunk of the response body. This method may
@@ -1876,7 +1883,7 @@ be called multiple times to provide successive parts of the body.
 
 `chunk` can be a string or a buffer. If `chunk` is a string,
 the second parameter specifies how to encode it into a byte stream.
-By default the `encoding` is `'ascii'`.
+By default the `encoding` is `'utf8'`.
 
 **Note**: This is the raw HTTP body and has nothing to do with
 higher-level multi-part body encodings that may be used.
@@ -2029,7 +2036,7 @@ Emitted when a response is received to this request. This event is emitted only 
 `response` argument will be an instance of `http.ClientResponse`.
 
 
-### request.write(chunk, encoding='ascii')
+### request.write(chunk, encoding='utf8')
 
 Sends a chunk of the body.  By calling this method
 many times, the user can stream a request body to a
@@ -2041,10 +2048,8 @@ The `chunk` argument should be an array of integers
 or a string.
 
 The `encoding` argument is optional and only
-applies when `chunk` is a string. The encoding
-argument should be either `'utf8'` or
-`'ascii'`. By default the body uses ASCII encoding,
-as it is faster.
+applies when `chunk` is a string.
+
 
 ### request.end([data], [encoding])
 
@@ -2143,7 +2148,7 @@ changed to
 
     server.listen('/tmp/echo.sock');
 
-This is an EventEmitter with the following events:
+This is an `EventEmitter` with the following events:
 
 ### Event: 'connection'
 
@@ -2196,6 +2201,15 @@ Stops the server from accepting new connections. This function is
 asynchronous, the server is finally closed when the server emits a `'close'`
 event.
 
+### server.maxConnections
+
+Set this property to reject connections when the server's connection count gets high.
+
+### server.connections
+
+The number of concurrent connections on the server.
+
+
 
 ## net.Stream
 
@@ -2204,7 +2218,7 @@ instance implement a duplex stream interface.  They can be created by the
 user and used as a client (with `connect()`) or they can be created by Node
 and passed to the user through the `'connection'` event of a server.
 
-`net.Stream` instances are an EventEmitters with the following events:
+`net.Stream` instances are EventEmitters with the following events:
 
 ### Event: 'connect'
 
@@ -2218,7 +2232,7 @@ See `connect()`.
 
 `function () { }`
 
-Emitted when a stream connection successfully establishes a HTTPS handshake with its peer.
+Emitted when a stream connection successfully establishes an SSL handshake with its peer.
 
 
 ### Event: 'data'
@@ -2307,9 +2321,9 @@ received.
 
 ### stream.setSecure([credentials])
 
-Enables HTTPS support for the stream, with the crypto module credentials specifying the private key and certificate of the stream, and optionally the CA certificates for use in peer authentication.
+Enables SSL support for the stream, with the crypto module credentials specifying the private key and certificate of the stream, and optionally the CA certificates for use in peer authentication.
 
-If the credentials hold one ore more CA certificates, then the stream will request for the peer to submit a client certificate as part of the HTTPS connection handshake. The validity and content of this can be accessed via verifyPeer() and getPeerCertificate().
+If the credentials hold one ore more CA certificates, then the stream will request for the peer to submit a client certificate as part of the SSL connection handshake. The validity and content of this can be accessed via verifyPeer() and getPeerCertificate().
 
 ### stream.verifyPeer()
 
@@ -2518,6 +2532,17 @@ resolves the IP addresses which are returned.
         });
       });
     });
+
+### dns.lookup(domain, family=null, callback)
+
+Resolves a domain (e.g. `'google.com'`) into the first found A (IPv4) or
+AAAA (IPv6) record.
+
+The callback has arguments `(err, address, family)`.  The `address` argument
+is a string representation of a IP v4 or v6 address. The `family` argument
+is either the integer 4 or 6 and denotes the family of `address` (not
+neccessarily the value initially passed to `lookup`).
+
 
 ### dns.resolve(domain, rrtype='A', callback)
 
@@ -3266,3 +3291,49 @@ All Node addons must export a function called `init` with this signature:
 
 For the moment, that is all the documentation on addons. Please see
 <http://github.com/ry/node_postgres> for a real example.
+
+
+## Appendix - Third Party Modules
+
+There are many third party modules for Node. At the time of writing, August
+2010, the master repository of modules is
+http://github.com/ry/node/wiki/modules[the wiki page].
+
+This appendix is intended as a SMALL guide to new-comers to help them
+quickly find what are considered to be quality modules. It is not intended
+to be a complete list.  There may be better more complete modules found
+elsewhere.
+
+- Module Installer: [npm](http://github.com/isaacs/npm)
+
+- HTTP Middleware: [Connect](http://github.com/senchalabs/connect)
+
+- Web Framework: [Express](http://github.com/visionmedia/express)
+
+- Web Sockets: [Socket.IO](http://github.com/LearnBoost/Socket.IO-node)
+
+- HTML Parsing: [HTML5](http://github.com/aredridel/html5)
+
+- [mDNS/Zeroconf/Bonjour](http://github.com/agnat/node_mdns)
+
+- [RabbitMQ, AMQP](http://github.com/ry/node-amqp)
+
+- [mysql](http://github.com/felixge/node-mysql)
+
+- Serialization: [msgpack](http://github.com/pgriess/node-msgpack)
+
+- Scraping: [Apricot](http://github.com/silentrob/Apricot)
+
+- Debugger: [ndb](http://github.com/smtlaissezfaire/ndb) is a CLI debugger
+  [inspector](http://github.com/dannycoates/node-inspector) is a web based
+  tool.
+
+- [pcap binding](http://github.com/mranney/node_pcap)
+
+- [ncurses](http://github.com/mscdex/node-ncurses)
+
+- Testing/TDD/BDD: [vows](http://vowsjs.org/),
+  [expresso](http://github.com/visionmedia/expresso),
+  [mjsunit.runner](http://github.com/tmpvar/mjsunit.runner)
+
+Patches to this list are welcome.

@@ -120,6 +120,11 @@ struct SwVfpRegister {
     ASSERT(is_valid());
     return 1 << code_;
   }
+  void split_code(int* vm, int* m) const  {
+    ASSERT(is_valid());
+    *m = code_ & 0x1;
+    *vm = code_ >> 1;
+  }
 
   int code_;
 };
@@ -151,6 +156,11 @@ struct DwVfpRegister {
   int bit() const  {
     ASSERT(is_valid());
     return 1 << code_;
+  }
+  void split_code(int* vm, int* m) const  {
+    ASSERT(is_valid());
+    *m = (code_ & 0x10) >> 4;
+    *vm = code_ & 0x0F;
   }
 
   int code_;
@@ -966,6 +976,11 @@ class Assembler : public Malloced {
             int offset,  // Offset must be a multiple of 4.
             const Condition cond = al);
 
+  void vstr(const SwVfpRegister src,
+            const Register base,
+            int offset,  // Offset must be a multiple of 4.
+            const Condition cond = al);
+
   void vmov(const DwVfpRegister dst,
             double imm,
             const Condition cond = al);
@@ -1029,6 +1044,10 @@ class Assembler : public Malloced {
             const Condition cond = al);
   void vcmp(const DwVfpRegister src1,
             const DwVfpRegister src2,
+            const SBit s = LeaveCC,
+            const Condition cond = al);
+  void vcmp(const DwVfpRegister src1,
+            const double src2,
             const SBit s = LeaveCC,
             const Condition cond = al);
   void vmrs(const Register dst,

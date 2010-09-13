@@ -132,13 +132,6 @@ class MacroAssembler: public Assembler {
   // ---------------------------------------------------------------------------
   // Debugger Support
 
-  void SaveRegistersToMemory(RegList regs);
-  void RestoreRegistersFromMemory(RegList regs);
-  void PushRegistersFromMemory(RegList regs);
-  void PopRegistersToMemory(RegList regs);
-  void CopyRegistersFromStackToMemory(Register base,
-                                      Register scratch,
-                                      RegList regs);
   void DebugBreak();
 #endif
 
@@ -161,17 +154,16 @@ class MacroAssembler: public Assembler {
   // debug mode. Expects the number of arguments in register rax and
   // sets up the number of arguments in register rdi and the pointer
   // to the first argument in register rsi.
-  void EnterExitFrame(ExitFrame::Mode mode, int result_size = 1);
+  void EnterExitFrame(int result_size = 1);
 
-  void EnterApiExitFrame(ExitFrame::Mode mode,
-                         int stack_space,
+  void EnterApiExitFrame(int stack_space,
                          int argc,
                          int result_size = 1);
 
   // Leave the current exit frame. Expects/provides the return value in
   // register rax:rdx (untouched) and the pointer to the first
   // argument in register rsi.
-  void LeaveExitFrame(ExitFrame::Mode mode, int result_size = 1);
+  void LeaveExitFrame(int result_size = 1);
 
 
   // ---------------------------------------------------------------------------
@@ -202,6 +194,9 @@ class MacroAssembler: public Assembler {
   // Invoke specified builtin JavaScript function. Adds an entry to
   // the unresolved list if the name does not resolve.
   void InvokeBuiltin(Builtins::JavaScript id, InvokeFlag flag);
+
+  // Store the function for the given builtin in the target register.
+  void GetBuiltinFunction(Register target, Builtins::JavaScript id);
 
   // Store the code object for the given builtin in the target register.
   void GetBuiltinEntry(Register target, Builtins::JavaScript id);
@@ -284,7 +279,9 @@ class MacroAssembler: public Assembler {
   Condition CheckBothPositiveSmi(Register first, Register second);
 
   // Are either value a tagged smi.
-  Condition CheckEitherSmi(Register first, Register second);
+  Condition CheckEitherSmi(Register first,
+                           Register second,
+                           Register scratch = kScratchRegister);
 
   // Is the value the minimum smi value (since we are using
   // two's complement numbers, negating the value is known to yield
@@ -580,6 +577,9 @@ class MacroAssembler: public Assembler {
   // Abort execution if argument is not a number. Used in debug code.
   void AbortIfNotNumber(Register object);
 
+  // Abort execution if argument is a smi. Used in debug code.
+  void AbortIfSmi(Register object);
+
   // Abort execution if argument is not a smi. Used in debug code.
   void AbortIfNotSmi(Register object);
 
@@ -715,6 +715,12 @@ class MacroAssembler: public Assembler {
   // occurred.
   void IllegalOperation(int num_arguments);
 
+  // Picks out an array index from the hash field.
+  // Register use:
+  //   hash - holds the index's hash. Clobbered.
+  //   index - holds the overwritten index on exit.
+  void IndexFromHash(Register hash, Register index);
+
   // Find the function context up the context chain.
   void LoadContext(Register dst, int context_chain_length);
 
@@ -827,6 +833,8 @@ class MacroAssembler: public Assembler {
   // Use --debug_code to enable.
   void Assert(Condition cc, const char* msg);
 
+  void AssertFastElements(Register elements);
+
   // Like Assert(), but always enabled.
   void Check(Condition cc, const char* msg);
 
@@ -868,8 +876,8 @@ class MacroAssembler: public Assembler {
   void EnterFrame(StackFrame::Type type);
   void LeaveFrame(StackFrame::Type type);
 
-  void EnterExitFramePrologue(ExitFrame::Mode mode, bool save_rax);
-  void EnterExitFrameEpilogue(ExitFrame::Mode mode, int result_size, int argc);
+  void EnterExitFramePrologue(bool save_rax);
+  void EnterExitFrameEpilogue(int result_size, int argc);
 
   // Allocation support helpers.
   // Loads the top of new-space into the result register.

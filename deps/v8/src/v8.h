@@ -60,9 +60,6 @@
 #include "flags.h"
 
 // Objects & heap
-#include "objects.h"
-#include "spaces.h"
-#include "heap.h"
 #include "objects-inl.h"
 #include "spaces-inl.h"
 #include "heap-inl.h"
@@ -92,7 +89,8 @@ class V8 : public AllStatic {
   static void SetFatalError();
 
   // Report process out of memory. Implementation found in api.cc.
-  static void FatalProcessOutOfMemory(const char* location);
+  static void FatalProcessOutOfMemory(const char* location,
+                                      bool take_snapshot = false);
 
   // Random number generation support. Not cryptographically safe.
   static uint32_t Random();

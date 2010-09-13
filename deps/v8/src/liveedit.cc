@@ -32,6 +32,7 @@
 #include "compiler.h"
 #include "oprofile-agent.h"
 #include "scopes.h"
+#include "scopeinfo.h"
 #include "global-handles.h"
 #include "debug.h"
 #include "memory.h"
@@ -500,12 +501,16 @@ class FunctionInfoWrapper : public JSArrayBasedStruct<FunctionInfoWrapper> {
     this->SetSmiValueField(kParamNumOffset_, param_num);
     this->SetSmiValueField(kParentIndexOffset_, parent_index);
   }
-  void SetFunctionCode(Handle<Code> function_code) {
-    Handle<JSValue> wrapper = WrapInJSValue(*function_code);
-    this->SetField(kCodeOffset_, wrapper);
+  void SetFunctionCode(Handle<Code> function_code,
+      Handle<Object> code_scope_info) {
+    Handle<JSValue> code_wrapper = WrapInJSValue(*function_code);
+    this->SetField(kCodeOffset_, code_wrapper);
+
+    Handle<JSValue> scope_wrapper = WrapInJSValue(*code_scope_info);
+    this->SetField(kCodeScopeInfoOffset_, scope_wrapper);
   }
-  void SetScopeInfo(Handle<Object> scope_info_array) {
-    this->SetField(kScopeInfoOffset_, scope_info_array);
+  void SetOuterScopeInfo(Handle<Object> scope_info_array) {
+    this->SetField(kOuterScopeInfoOffset_, scope_info_array);
   }
   void SetSharedFunctionInfo(Handle<SharedFunctionInfo> info) {
     Handle<JSValue> info_holder = WrapInJSValue(*info);
@@ -518,6 +523,11 @@ class FunctionInfoWrapper : public JSArrayBasedStruct<FunctionInfoWrapper> {
     Handle<Object> raw_result = UnwrapJSValue(Handle<JSValue>(
         JSValue::cast(this->GetField(kCodeOffset_))));
     return Handle<Code>::cast(raw_result);
+  }
+  Handle<Object> GetCodeScopeInfo() {
+    Handle<Object> raw_result = UnwrapJSValue(Handle<JSValue>(
+        JSValue::cast(this->GetField(kCodeScopeInfoOffset_))));
+    return raw_result;
   }
   int GetStartPosition() {
     return this->GetSmiValueField(kStartPositionOffset_);
@@ -532,10 +542,11 @@ class FunctionInfoWrapper : public JSArrayBasedStruct<FunctionInfoWrapper> {
   static const int kEndPositionOffset_ = 2;
   static const int kParamNumOffset_ = 3;
   static const int kCodeOffset_ = 4;
-  static const int kScopeInfoOffset_ = 5;
-  static const int kParentIndexOffset_ = 6;
-  static const int kSharedFunctionInfoOffset_ = 7;
-  static const int kSize_ = 8;
+  static const int kCodeScopeInfoOffset_ = 5;
+  static const int kOuterScopeInfoOffset_ = 6;
+  static const int kParentIndexOffset_ = 7;
+  static const int kSharedFunctionInfoOffset_ = 8;
+  static const int kSize_ = 9;
 
   friend class JSArrayBasedStruct<FunctionInfoWrapper>;
 };
@@ -671,7 +682,7 @@ class FunctionInfoListener {
   void FunctionCode(Handle<Code> function_code) {
     FunctionInfoWrapper info =
         FunctionInfoWrapper::cast(result_->GetElement(current_parent_index_));
-    info.SetFunctionCode(function_code);
+    info.SetFunctionCode(function_code, Handle<Object>(Heap::null_value()));
   }
 
   // Saves full information about a function: its code, its scope info
@@ -682,11 +693,12 @@ class FunctionInfoListener {
     }
     FunctionInfoWrapper info =
         FunctionInfoWrapper::cast(result_->GetElement(current_parent_index_));
-    info.SetFunctionCode(Handle<Code>(shared->code()));
+    info.SetFunctionCode(Handle<Code>(shared->code()),
+        Handle<Object>(shared->scope_info()));
     info.SetSharedFunctionInfo(shared);
 
     Handle<Object> scope_info_list(SerializeFunctionScope(scope));
-    info.SetScopeInfo(scope_info_list);
+    info.SetOuterScopeInfo(scope_info_list);
   }
 
   Handle<JSArray> GetResult() {
@@ -727,7 +739,7 @@ void LiveEdit::WrapSharedFunctionInfos(Handle<JSArray> array) {
     Handle<String> name_handle(String::cast(info->name()));
     info_wrapper.SetProperties(name_handle, info->start_position(),
                                info->end_position(), info);
-    array->SetElement(i, *(info_wrapper.GetJSArray()));
+    SetElement(array, i, info_wrapper.GetJSArray());
   }
 }
 
@@ -738,7 +750,7 @@ void LiveEdit::WrapSharedFunctionInfos(Handle<JSArray> array) {
 class ReferenceCollectorVisitor : public ObjectVisitor {
  public:
   explicit ReferenceCollectorVisitor(Code* original)
-      : original_(original), rvalues_(10), reloc_infos_(10) {
+    : original_(original), rvalues_(10), reloc_infos_(10), code_entries_(10) {
   }
 
   virtual void VisitPointers(Object** start, Object** end) {
@@ -749,7 +761,13 @@ class ReferenceCollectorVisitor : public ObjectVisitor {
     }
   }
 
-  void VisitCodeTarget(RelocInfo* rinfo) {
+  virtual void VisitCodeEntry(Address entry) {
+    if (Code::GetObjectFromEntryAddress(entry) == original_) {
+      code_entries_.Add(entry);
+    }
+  }
+
+  virtual void VisitCodeTarget(RelocInfo* rinfo) {
     if (RelocInfo::IsCodeTarget(rinfo->rmode()) &&
         Code::GetCodeFromTargetAddress(rinfo->target_address()) == original_) {
       reloc_infos_.Add(*rinfo);
@@ -766,8 +784,13 @@ class ReferenceCollectorVisitor : public ObjectVisitor {
     for (int i = 0; i < rvalues_.length(); i++) {
       *(rvalues_[i]) = substitution;
     }
+    Address substitution_entry = substitution->instruction_start();
     for (int i = 0; i < reloc_infos_.length(); i++) {
-      reloc_infos_[i].set_target_address(substitution->instruction_start());
+      reloc_infos_[i].set_target_address(substitution_entry);
+    }
+    for (int i = 0; i < code_entries_.length(); i++) {
+      Address entry = code_entries_[i];
+      Memory::Address_at(entry) = substitution_entry;
     }
   }
 
@@ -775,27 +798,9 @@ class ReferenceCollectorVisitor : public ObjectVisitor {
   Code* original_;
   ZoneList<Object**> rvalues_;
   ZoneList<RelocInfo> reloc_infos_;
+  ZoneList<Address> code_entries_;
 };
 
-
-class FrameCookingThreadVisitor : public ThreadVisitor {
- public:
-  void VisitThread(ThreadLocalTop* top) {
-    StackFrame::CookFramesForThread(top);
-  }
-};
-
-class FrameUncookingThreadVisitor : public ThreadVisitor {
- public:
-  void VisitThread(ThreadLocalTop* top) {
-    StackFrame::UncookFramesForThread(top);
-  }
-};
-
-static void IterateAllThreads(ThreadVisitor* visitor) {
-  Top::IterateThread(visitor);
-  ThreadManager::IterateArchivedThreads(visitor);
-}
 
 // Finds all references to original and replaces them with substitution.
 static void ReplaceCodeObject(Code* original, Code* substitution) {
@@ -812,13 +817,7 @@ static void ReplaceCodeObject(Code* original, Code* substitution) {
   // so temporary replace the pointers with offset numbers
   // in prologue/epilogue.
   {
-    FrameCookingThreadVisitor cooking_visitor;
-    IterateAllThreads(&cooking_visitor);
-
     Heap::IterateStrongRoots(&visitor, VISIT_ALL);
-
-    FrameUncookingThreadVisitor uncooking_visitor;
-    IterateAllThreads(&uncooking_visitor);
   }
 
   // Now iterate over all pointers of all objects, including code_target
@@ -855,6 +854,10 @@ Object* LiveEdit::ReplaceFunctionCode(Handle<JSArray> new_compile_info_array,
   if (IsJSFunctionCode(shared_info->code())) {
     ReplaceCodeObject(shared_info->code(),
                       *(compile_info_wrapper.GetFunctionCode()));
+    Handle<Object> code_scope_info =  compile_info_wrapper.GetCodeScopeInfo();
+    if (code_scope_info->IsFixedArray()) {
+      shared_info->set_scope_info(SerializedScopeInfo::cast(*code_scope_info));
+    }
   }
 
   if (shared_info->debug_info()->IsDebugInfo()) {
@@ -1190,7 +1193,7 @@ static const char* DropFrames(Vector<StackFrame*> frames,
                               int bottom_js_frame_index,
                               Debug::FrameDropMode* mode,
                               Object*** restarter_frame_function_pointer) {
-  if (Debug::kFrameDropperFrameSize < 0) {
+  if (!Debug::kFrameDropperSupported) {
     return "Stack manipulations are not supported in this architecture.";
   }
 
@@ -1356,8 +1359,9 @@ static const char* DropActivationsInActiveThread(
   for (int i = 0; i < array_len; i++) {
     if (result->GetElement(i) ==
         Smi::FromInt(LiveEdit::FUNCTION_BLOCKED_ON_ACTIVE_STACK)) {
-      result->SetElement(i, Smi::FromInt(
-          LiveEdit::FUNCTION_REPLACED_ON_ACTIVE_STACK));
+      Handle<Object> replaced(
+          Smi::FromInt(LiveEdit::FUNCTION_REPLACED_ON_ACTIVE_STACK));
+      SetElement(result, i, replaced);
     }
   }
   return NULL;

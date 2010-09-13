@@ -126,7 +126,7 @@ static FatalErrorCallback& GetFatalErrorHandler() {
 
 // When V8 cannot allocated memory FatalProcessOutOfMemory is called.
 // The default fatal error handler is called and execution is stopped.
-void i::V8::FatalProcessOutOfMemory(const char* location) {
+void i::V8::FatalProcessOutOfMemory(const char* location, bool take_snapshot) {
   i::HeapStats heap_stats;
   int start_marker;
   heap_stats.start_marker = &start_marker;
@@ -166,9 +166,19 @@ void i::V8::FatalProcessOutOfMemory(const char* location) {
   heap_stats.near_death_global_handle_count = &near_death_global_handle_count;
   int destroyed_global_handle_count;
   heap_stats.destroyed_global_handle_count = &destroyed_global_handle_count;
+  int memory_allocator_size;
+  heap_stats.memory_allocator_size = &memory_allocator_size;
+  int memory_allocator_capacity;
+  heap_stats.memory_allocator_capacity = &memory_allocator_capacity;
+  int objects_per_type[LAST_TYPE + 1] = {0};
+  heap_stats.objects_per_type = objects_per_type;
+  int size_per_type[LAST_TYPE + 1] = {0};
+  heap_stats.size_per_type = size_per_type;
+  int os_error;
+  heap_stats.os_error = &os_error;
   int end_marker;
   heap_stats.end_marker = &end_marker;
-  i::Heap::RecordStats(&heap_stats);
+  i::Heap::RecordStats(&heap_stats, take_snapshot);
   i::V8::SetFatalError();
   FatalErrorCallback callback = GetFatalErrorHandler();
   {
@@ -1126,13 +1136,18 @@ ScriptData* ScriptData::PreCompile(v8::Handle<String> source) {
 ScriptData* ScriptData::New(const char* data, int length) {
   // Return an empty ScriptData if the length is obviously invalid.
   if (length % sizeof(unsigned) != 0) {
-    return new i::ScriptDataImpl(i::Vector<unsigned>());
+    return new i::ScriptDataImpl();
   }
 
   // Copy the data to ensure it is properly aligned.
   int deserialized_data_length = length / sizeof(unsigned);
+  // If aligned, don't create a copy of the data.
+  if (reinterpret_cast<intptr_t>(data) % sizeof(unsigned) == 0) {
+    return new i::ScriptDataImpl(data, length);
+  }
+  // Copy the data to align it.
   unsigned* deserialized_data = i::NewArray<unsigned>(deserialized_data_length);
-  memcpy(deserialized_data, data, length);
+  i::MemCopy(deserialized_data, data, length);
 
   return new i::ScriptDataImpl(
       i::Vector<unsigned>(deserialized_data, deserialized_data_length));
@@ -1781,6 +1796,13 @@ bool Value::IsDate() const {
   if (IsDeadCheck("v8::Value::IsDate()")) return false;
   i::Handle<i::Object> obj = Utils::OpenHandle(this);
   return obj->HasSpecificClassOf(i::Heap::Date_symbol());
+}
+
+
+bool Value::IsRegExp() const {
+  if (IsDeadCheck("v8::Value::IsRegExp()")) return false;
+  i::Handle<i::Object> obj = Utils::OpenHandle(this);
+  return obj->IsJSRegExp();
 }
 
 
@@ -3888,6 +3910,22 @@ void V8::RemoveGCEpilogueCallback(GCEpilogueCallback callback) {
 }
 
 
+void V8::AddMemoryAllocationCallback(MemoryAllocationCallback callback,
+                                     ObjectSpace space,
+                                     AllocationAction action) {
+  if (IsDeadCheck("v8::V8::AddMemoryAllocationCallback()")) return;
+  i::MemoryAllocator::AddMemoryAllocationCallback(callback,
+                                                  space,
+                                                  action);
+}
+
+
+void V8::RemoveMemoryAllocationCallback(MemoryAllocationCallback callback) {
+  if (IsDeadCheck("v8::V8::RemoveMemoryAllocationCallback()")) return;
+  i::MemoryAllocator::RemoveMemoryAllocationCallback(callback);
+}
+
+
 void V8::PauseProfiler() {
 #ifdef ENABLE_LOGGING_AND_PROFILING
   PauseProfilerEx(PROFILER_MODULE_CPU);
@@ -4483,24 +4521,27 @@ const CpuProfile* CpuProfiler::StopProfiling(Handle<String> title,
 }
 
 
+static i::HeapGraphEdge* ToInternal(const HeapGraphEdge* edge) {
+  return const_cast<i::HeapGraphEdge*>(
+      reinterpret_cast<const i::HeapGraphEdge*>(edge));
+}
+
 HeapGraphEdge::Type HeapGraphEdge::GetType() const {
   IsDeadCheck("v8::HeapGraphEdge::GetType");
-  return static_cast<HeapGraphEdge::Type>(
-      reinterpret_cast<const i::HeapGraphEdge*>(this)->type());
+  return static_cast<HeapGraphEdge::Type>(ToInternal(this)->type());
 }
 
 
 Handle<Value> HeapGraphEdge::GetName() const {
   IsDeadCheck("v8::HeapGraphEdge::GetName");
-  const i::HeapGraphEdge* edge =
-      reinterpret_cast<const i::HeapGraphEdge*>(this);
+  i::HeapGraphEdge* edge = ToInternal(this);
   switch (edge->type()) {
-    case i::HeapGraphEdge::CONTEXT_VARIABLE:
-    case i::HeapGraphEdge::INTERNAL:
-    case i::HeapGraphEdge::PROPERTY:
+    case i::HeapGraphEdge::kContextVariable:
+    case i::HeapGraphEdge::kInternal:
+    case i::HeapGraphEdge::kProperty:
       return Handle<String>(ToApi<String>(i::Factory::LookupAsciiSymbol(
           edge->name())));
-    case i::HeapGraphEdge::ELEMENT:
+    case i::HeapGraphEdge::kElement:
       return Handle<Number>(ToApi<Number>(i::Factory::NewNumberFromInt(
           edge->index())));
     default: UNREACHABLE();
@@ -4511,28 +4552,32 @@ Handle<Value> HeapGraphEdge::GetName() const {
 
 const HeapGraphNode* HeapGraphEdge::GetFromNode() const {
   IsDeadCheck("v8::HeapGraphEdge::GetFromNode");
-  const i::HeapEntry* from =
-      reinterpret_cast<const i::HeapGraphEdge*>(this)->from();
+  const i::HeapEntry* from = ToInternal(this)->From();
   return reinterpret_cast<const HeapGraphNode*>(from);
 }
 
 
 const HeapGraphNode* HeapGraphEdge::GetToNode() const {
   IsDeadCheck("v8::HeapGraphEdge::GetToNode");
-  const i::HeapEntry* to =
-      reinterpret_cast<const i::HeapGraphEdge*>(this)->to();
+  const i::HeapEntry* to = ToInternal(this)->to();
   return reinterpret_cast<const HeapGraphNode*>(to);
 }
 
 
+static i::HeapGraphPath* ToInternal(const HeapGraphPath* path) {
+  return const_cast<i::HeapGraphPath*>(
+      reinterpret_cast<const i::HeapGraphPath*>(path));
+}
+
+
 int HeapGraphPath::GetEdgesCount() const {
-  return reinterpret_cast<const i::HeapGraphPath*>(this)->path()->length();
+  return ToInternal(this)->path()->length();
 }
 
 
 const HeapGraphEdge* HeapGraphPath::GetEdge(int index) const {
   return reinterpret_cast<const HeapGraphEdge*>(
-      reinterpret_cast<const i::HeapGraphPath*>(this)->path()->at(index));
+      ToInternal(this)->path()->at(index));
 }
 
 
@@ -4547,137 +4592,150 @@ const HeapGraphNode* HeapGraphPath::GetToNode() const {
 }
 
 
+static i::HeapEntry* ToInternal(const HeapGraphNode* entry) {
+  return const_cast<i::HeapEntry*>(
+      reinterpret_cast<const i::HeapEntry*>(entry));
+}
+
+
 HeapGraphNode::Type HeapGraphNode::GetType() const {
   IsDeadCheck("v8::HeapGraphNode::GetType");
-  return static_cast<HeapGraphNode::Type>(
-      reinterpret_cast<const i::HeapEntry*>(this)->type());
+  return static_cast<HeapGraphNode::Type>(ToInternal(this)->type());
 }
 
 
 Handle<String> HeapGraphNode::GetName() const {
   IsDeadCheck("v8::HeapGraphNode::GetName");
   return Handle<String>(ToApi<String>(i::Factory::LookupAsciiSymbol(
-      reinterpret_cast<const i::HeapEntry*>(this)->name())));
+      ToInternal(this)->name())));
 }
 
 
 uint64_t HeapGraphNode::GetId() const {
   IsDeadCheck("v8::HeapGraphNode::GetId");
-  return reinterpret_cast<const i::HeapEntry*>(this)->id();
+  ASSERT(ToInternal(this)->snapshot()->type() != i::HeapSnapshot::kAggregated);
+  return ToInternal(this)->id();
+}
+
+
+int HeapGraphNode::GetInstancesCount() const {
+  IsDeadCheck("v8::HeapGraphNode::GetInstancesCount");
+  ASSERT(ToInternal(this)->snapshot()->type() == i::HeapSnapshot::kAggregated);
+  return static_cast<int>(ToInternal(this)->id());
 }
 
 
 int HeapGraphNode::GetSelfSize() const {
   IsDeadCheck("v8::HeapGraphNode::GetSelfSize");
-  return reinterpret_cast<const i::HeapEntry*>(this)->self_size();
+  return ToInternal(this)->self_size();
 }
 
 
-int HeapGraphNode::GetTotalSize() const {
-  IsDeadCheck("v8::HeapSnapshot::GetHead");
-  return const_cast<i::HeapEntry*>(
-      reinterpret_cast<const i::HeapEntry*>(this))->TotalSize();
+int HeapGraphNode::GetReachableSize() const {
+  IsDeadCheck("v8::HeapSnapshot::GetReachableSize");
+  return ToInternal(this)->ReachableSize();
 }
 
 
-int HeapGraphNode::GetPrivateSize() const {
-  IsDeadCheck("v8::HeapSnapshot::GetPrivateSize");
-  return const_cast<i::HeapEntry*>(
-      reinterpret_cast<const i::HeapEntry*>(this))->NonSharedTotalSize();
+int HeapGraphNode::GetRetainedSize() const {
+  IsDeadCheck("v8::HeapSnapshot::GetRetainedSize");
+  return ToInternal(this)->RetainedSize();
 }
 
 
 int HeapGraphNode::GetChildrenCount() const {
   IsDeadCheck("v8::HeapSnapshot::GetChildrenCount");
-  return reinterpret_cast<const i::HeapEntry*>(this)->children()->length();
+  return ToInternal(this)->children().length();
 }
 
 
 const HeapGraphEdge* HeapGraphNode::GetChild(int index) const {
   IsDeadCheck("v8::HeapSnapshot::GetChild");
   return reinterpret_cast<const HeapGraphEdge*>(
-      reinterpret_cast<const i::HeapEntry*>(this)->children()->at(index));
+      &ToInternal(this)->children()[index]);
 }
 
 
 int HeapGraphNode::GetRetainersCount() const {
   IsDeadCheck("v8::HeapSnapshot::GetRetainersCount");
-  return reinterpret_cast<const i::HeapEntry*>(this)->retainers()->length();
+  return ToInternal(this)->retainers().length();
 }
 
 
 const HeapGraphEdge* HeapGraphNode::GetRetainer(int index) const {
   IsDeadCheck("v8::HeapSnapshot::GetRetainer");
   return reinterpret_cast<const HeapGraphEdge*>(
-      reinterpret_cast<const i::HeapEntry*>(this)->retainers()->at(index));
+      ToInternal(this)->retainers()[index]);
 }
 
 
 int HeapGraphNode::GetRetainingPathsCount() const {
   IsDeadCheck("v8::HeapSnapshot::GetRetainingPathsCount");
-  return const_cast<i::HeapEntry*>(
-      reinterpret_cast<const i::HeapEntry*>(
-          this))->GetRetainingPaths()->length();
+  return ToInternal(this)->GetRetainingPaths()->length();
 }
 
 
 const HeapGraphPath* HeapGraphNode::GetRetainingPath(int index) const {
   IsDeadCheck("v8::HeapSnapshot::GetRetainingPath");
   return reinterpret_cast<const HeapGraphPath*>(
-      const_cast<i::HeapEntry*>(
-          reinterpret_cast<const i::HeapEntry*>(
-              this))->GetRetainingPaths()->at(index));
+      ToInternal(this)->GetRetainingPaths()->at(index));
 }
 
 
 const HeapGraphNode* HeapSnapshotsDiff::GetAdditionsRoot() const {
   IsDeadCheck("v8::HeapSnapshotsDiff::GetAdditionsRoot");
-  const i::HeapSnapshotsDiff* diff =
-      reinterpret_cast<const i::HeapSnapshotsDiff*>(this);
+  i::HeapSnapshotsDiff* diff =
+      const_cast<i::HeapSnapshotsDiff*>(
+          reinterpret_cast<const i::HeapSnapshotsDiff*>(this));
   return reinterpret_cast<const HeapGraphNode*>(diff->additions_root());
 }
 
 
 const HeapGraphNode* HeapSnapshotsDiff::GetDeletionsRoot() const {
   IsDeadCheck("v8::HeapSnapshotsDiff::GetDeletionsRoot");
-  const i::HeapSnapshotsDiff* diff =
-      reinterpret_cast<const i::HeapSnapshotsDiff*>(this);
+  i::HeapSnapshotsDiff* diff =
+      const_cast<i::HeapSnapshotsDiff*>(
+          reinterpret_cast<const i::HeapSnapshotsDiff*>(this));
   return reinterpret_cast<const HeapGraphNode*>(diff->deletions_root());
+}
+
+
+static i::HeapSnapshot* ToInternal(const HeapSnapshot* snapshot) {
+  return const_cast<i::HeapSnapshot*>(
+      reinterpret_cast<const i::HeapSnapshot*>(snapshot));
+}
+
+
+HeapSnapshot::Type HeapSnapshot::GetType() const {
+  IsDeadCheck("v8::HeapSnapshot::GetType");
+  return static_cast<HeapSnapshot::Type>(ToInternal(this)->type());
 }
 
 
 unsigned HeapSnapshot::GetUid() const {
   IsDeadCheck("v8::HeapSnapshot::GetUid");
-  return reinterpret_cast<const i::HeapSnapshot*>(this)->uid();
+  return ToInternal(this)->uid();
 }
 
 
 Handle<String> HeapSnapshot::GetTitle() const {
   IsDeadCheck("v8::HeapSnapshot::GetTitle");
-  const i::HeapSnapshot* snapshot =
-      reinterpret_cast<const i::HeapSnapshot*>(this);
   return Handle<String>(ToApi<String>(i::Factory::LookupAsciiSymbol(
-      snapshot->title())));
+      ToInternal(this)->title())));
 }
 
 
 const HeapGraphNode* HeapSnapshot::GetRoot() const {
   IsDeadCheck("v8::HeapSnapshot::GetHead");
-  const i::HeapSnapshot* snapshot =
-      reinterpret_cast<const i::HeapSnapshot*>(this);
-  return reinterpret_cast<const HeapGraphNode*>(snapshot->const_root());
+  return reinterpret_cast<const HeapGraphNode*>(ToInternal(this)->root());
 }
 
 
 const HeapSnapshotsDiff* HeapSnapshot::CompareWith(
     const HeapSnapshot* snapshot) const {
   IsDeadCheck("v8::HeapSnapshot::CompareWith");
-  i::HeapSnapshot* snapshot1 = const_cast<i::HeapSnapshot*>(
-      reinterpret_cast<const i::HeapSnapshot*>(this));
-  i::HeapSnapshot* snapshot2 = const_cast<i::HeapSnapshot*>(
-      reinterpret_cast<const i::HeapSnapshot*>(snapshot));
   return reinterpret_cast<const HeapSnapshotsDiff*>(
-      snapshot1->CompareWith(snapshot2));
+      ToInternal(this)->CompareWith(ToInternal(snapshot)));
 }
 
 
@@ -4701,10 +4759,22 @@ const HeapSnapshot* HeapProfiler::FindSnapshot(unsigned uid) {
 }
 
 
-const HeapSnapshot* HeapProfiler::TakeSnapshot(Handle<String> title) {
+const HeapSnapshot* HeapProfiler::TakeSnapshot(Handle<String> title,
+                                               HeapSnapshot::Type type) {
   IsDeadCheck("v8::HeapProfiler::TakeSnapshot");
+  i::HeapSnapshot::Type internal_type = i::HeapSnapshot::kFull;
+  switch (type) {
+    case HeapSnapshot::kFull:
+      internal_type = i::HeapSnapshot::kFull;
+      break;
+    case HeapSnapshot::kAggregated:
+      internal_type = i::HeapSnapshot::kAggregated;
+      break;
+    default:
+      UNREACHABLE();
+  }
   return reinterpret_cast<const HeapSnapshot*>(
-      i::HeapProfiler::TakeSnapshot(*Utils::OpenHandle(*title)));
+      i::HeapProfiler::TakeSnapshot(*Utils::OpenHandle(*title), internal_type));
 }
 
 #endif  // ENABLE_LOGGING_AND_PROFILING

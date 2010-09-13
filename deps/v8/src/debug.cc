@@ -461,6 +461,8 @@ void BreakLocationIterator::SetDebugBreakAtIC() {
       KeyedStoreIC::ClearInlinedVersion(pc());
     } else if (code->is_load_stub()) {
       LoadIC::ClearInlinedVersion(pc());
+    } else if (code->is_store_stub()) {
+      StoreIC::ClearInlinedVersion(pc());
     }
   }
 }
@@ -549,6 +551,7 @@ void Debug::ThreadInit() {
   thread_local_.after_break_target_ = 0;
   thread_local_.debugger_entry_ = NULL;
   thread_local_.pending_interrupts_ = 0;
+  thread_local_.restarter_frame_function_pointer_ = NULL;
 }
 
 
@@ -580,6 +583,35 @@ char* Debug::RestoreDebug(char* storage) {
 int Debug::ArchiveSpacePerThread() {
   return sizeof(ThreadLocal) + sizeof(registers_);
 }
+
+
+// Frame structure (conforms InternalFrame structure):
+//   -- code
+//   -- SMI maker
+//   -- function (slot is called "context")
+//   -- frame base
+Object** Debug::SetUpFrameDropperFrame(StackFrame* bottom_js_frame,
+                                       Handle<Code> code) {
+  ASSERT(bottom_js_frame->is_java_script());
+
+  Address fp = bottom_js_frame->fp();
+
+  // Move function pointer into "context" slot.
+  Memory::Object_at(fp + StandardFrameConstants::kContextOffset) =
+      Memory::Object_at(fp + JavaScriptFrameConstants::kFunctionOffset);
+
+  Memory::Object_at(fp + InternalFrameConstants::kCodeOffset) = *code;
+  Memory::Object_at(fp + StandardFrameConstants::kMarkerOffset) =
+      Smi::FromInt(StackFrame::INTERNAL);
+
+  return reinterpret_cast<Object**>(&Memory::Object_at(
+      fp + StandardFrameConstants::kContextOffset));
+}
+
+const int Debug::kFrameDropperFrameSize = 4;
+
+
+
 
 
 // Default break enabled.
@@ -852,8 +884,8 @@ void Debug::PreemptionWhileInDebugger() {
 
 
 void Debug::Iterate(ObjectVisitor* v) {
-  v->VisitPointer(BitCast<Object**, Code**>(&(debug_break_return_)));
-  v->VisitPointer(BitCast<Object**, Code**>(&(debug_break_slot_)));
+  v->VisitPointer(BitCast<Object**>(&(debug_break_return_)));
+  v->VisitPointer(BitCast<Object**>(&(debug_break_slot_)));
 }
 
 
@@ -975,17 +1007,18 @@ Handle<Object> Debug::CheckBreakPoints(Handle<Object> break_point_objects) {
     for (int i = 0; i < array->length(); i++) {
       Handle<Object> o(array->get(i));
       if (CheckBreakPoint(o)) {
-        break_points_hit->SetElement(break_points_hit_count++, *o);
+        SetElement(break_points_hit, break_points_hit_count++, o);
       }
     }
   } else {
     if (CheckBreakPoint(break_point_objects)) {
-      break_points_hit->SetElement(break_points_hit_count++,
-                                   *break_point_objects);
+      SetElement(break_points_hit,
+                 break_points_hit_count++,
+                 break_point_objects);
     }
   }
 
-  // Return undefined if no break points where triggered.
+  // Return undefined if no break points were triggered.
   if (break_points_hit_count == 0) {
     return Factory::undefined_value();
   }
@@ -1411,7 +1444,7 @@ bool Debug::IsDebugBreak(Address addr) {
 // Check whether a code stub with the specified major key is a possible break
 // point location when looking for source break locations.
 bool Debug::IsSourceBreakStub(Code* code) {
-  CodeStub::Major major_key = code->major_key();
+  CodeStub::Major major_key = CodeStub::GetMajorKey(code);
   return major_key == CodeStub::CallFunction;
 }
 
@@ -1419,7 +1452,7 @@ bool Debug::IsSourceBreakStub(Code* code) {
 // Check whether a code stub with the specified major key is a possible break
 // location.
 bool Debug::IsBreakStub(Code* code) {
-  CodeStub::Major major_key = code->major_key();
+  CodeStub::Major major_key = CodeStub::GetMajorKey(code);
   return major_key == CodeStub::CallFunction ||
          major_key == CodeStub::StackCheck;
 }

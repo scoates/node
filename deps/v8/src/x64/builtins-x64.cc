@@ -310,8 +310,7 @@ void Builtins::Generate_FunctionCall(MacroAssembler* masm) {
   __ movsxlq(rbx,
              FieldOperand(rdx,
                           SharedFunctionInfo::kFormalParameterCountOffset));
-  __ movq(rdx, FieldOperand(rdx, SharedFunctionInfo::kCodeOffset));
-  __ lea(rdx, FieldOperand(rdx, Code::kHeaderSize));
+  __ movq(rdx, FieldOperand(rdi, JSFunction::kCodeEntryOffset));
   __ cmpq(rax, rbx);
   __ j(not_equal,
        Handle<Code>(builtin(ArgumentsAdaptorTrampoline)),
@@ -876,6 +875,13 @@ void Builtins::Generate_ArrayConstructCode(MacroAssembler* masm) {
 }
 
 
+void Builtins::Generate_StringConstructCode(MacroAssembler* masm) {
+  // TODO(849): implement custom construct stub.
+  // Generate a copy of the generic stub for now.
+  Generate_JSConstructStubGeneric(masm);
+}
+
+
 void Builtins::Generate_JSConstructCall(MacroAssembler* masm) {
   // ----------- S t a t e -------------
   //  -- rax: number of arguments
@@ -898,10 +904,6 @@ void Builtins::Generate_JSConstructCall(MacroAssembler* masm) {
   // rdi: called object
   // rax: number of arguments
   __ bind(&non_function_call);
-  // CALL_NON_FUNCTION expects the non-function constructor as receiver
-  // (instead of the original receiver from the call site).  The receiver is
-  // stack element argc+1.
-  __ movq(Operand(rsp, rax, times_pointer_size, kPointerSize), rdi);
   // Set expected number of arguments to zero (not changing rax).
   __ movq(rbx, Immediate(0));
   __ GetBuiltinEntry(rdx, Builtins::CALL_NON_FUNCTION_AS_CONSTRUCTOR);
@@ -1289,6 +1291,26 @@ void Builtins::Generate_JSEntryTrampoline(MacroAssembler* masm) {
 
 void Builtins::Generate_JSConstructEntryTrampoline(MacroAssembler* masm) {
   Generate_JSEntryTrampolineHelper(masm, true);
+}
+
+
+void Builtins::Generate_LazyCompile(MacroAssembler* masm) {
+  // Enter an internal frame.
+  __ EnterInternalFrame();
+
+  // Push a copy of the function onto the stack.
+  __ push(rdi);
+
+  __ push(rdi);  // Function is also the parameter to the runtime call.
+  __ CallRuntime(Runtime::kLazyCompile, 1);
+  __ pop(rdi);
+
+  // Tear down temporary frame.
+  __ LeaveInternalFrame();
+
+  // Do a tail-call of the compiled function.
+  __ lea(rcx, FieldOperand(rax, Code::kHeaderSize));
+  __ jmp(rcx);
 }
 
 } }  // namespace v8::internal

@@ -707,14 +707,20 @@ CallSite.prototype.getMethodName = function () {
   // See if we can find a unique property on the receiver that holds
   // this function.
   var ownName = this.fun.name;
-  if (ownName && this.receiver && this.receiver[ownName] === this.fun)
+  if (ownName && this.receiver &&
+      (ObjectLookupGetter.call(this.receiver, ownName) === this.fun ||
+       ObjectLookupSetter.call(this.receiver, ownName) === this.fun ||
+       this.receiver[ownName] === this.fun)) {
     // To handle DontEnum properties we guess that the method has
     // the same name as the function.
     return ownName;
+  }
   var name = null;
   for (var prop in this.receiver) {
-    if (this.receiver[prop] === this.fun) {
-      // If we find more than one match bail out to avoid confusion
+    if (this.receiver.__lookupGetter__(prop) === this.fun ||
+        this.receiver.__lookupSetter__(prop) === this.fun ||
+        (!this.receiver.__lookupGetter__(prop) && this.receiver[prop] === this.fun)) {
+      // If we find more than one match bail out to avoid confusion.
       if (name)
         return null;
       name = prop;
@@ -825,11 +831,11 @@ function FormatSourcePosition(frame) {
   }
   var line = "";
   var functionName = frame.getFunction().name;
-  var methodName = frame.getMethodName();
   var addPrefix = true;
   var isConstructor = frame.isConstructor();
   var isMethodCall = !(frame.isToplevel() || isConstructor);
   if (isMethodCall) {
+    var methodName = frame.getMethodName();
     line += frame.getTypeName() + ".";
     if (functionName) {
       line += functionName;

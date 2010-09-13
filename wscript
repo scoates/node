@@ -43,6 +43,13 @@ def set_options(opt):
                 , dest='efence'
                 )
 
+  opt.add_option( '--without-snapshot'
+                , action='store_true'
+                , default=False
+                , help='Build without snapshotting V8 libraries. You might want to set this for cross-compiling. [Default: False]'
+                , dest='without_snapshot'
+                )
+
   opt.add_option( '--without-ssl'
                 , action='store_true'
                 , default=False
@@ -135,6 +142,7 @@ def configure(conf):
   o = Options.options
 
   conf.env["USE_DEBUG"] = o.debug
+  conf.env["SNAPSHOT_V8"] = not o.without_snapshot
 
   conf.env["USE_SHARED_V8"] = o.shared_v8 or o.shared_v8_includes or o.shared_v8_libpath or o.shared_v8_libname
   conf.env["USE_SHARED_CARES"] = o.shared_cares or o.shared_cares_includes or o.shared_cares_libpath
@@ -154,11 +162,12 @@ def configure(conf):
   if Options.options.efence:
     conf.check(lib='efence', libpath=['/usr/lib', '/usr/local/lib'], uselib_store='EFENCE')
 
-  if not conf.check(lib="execinfo", includes=['/usr/include', '/usr/local/include'], libpath=['/usr/lib', '/usr/local/lib'], uselib_store="EXECINFO"):
-    # Note on Darwin/OS X: This will fail, but will still be used as the
-    # execinfo stuff are part of the standard library.
-    if sys.platform.startswith("freebsd"):
-      conf.fatal("Install the libexecinfo port from /usr/ports/devel/libexecinfo.")
+  if sys.platform.startswith("freebsd"):
+     if not conf.check(lib="execinfo",
+                       includes=['/usr/include', '/usr/local/include'],
+                       libpath=['/usr/lib', '/usr/local/lib'],
+                       uselib_store="EXECINFO"):
+       conf.fatal("Install the libexecinfo port from /usr/ports/devel/libexecinfo.")
 
   if not Options.options.without_ssl:
     if conf.check_cfg(package='openssl',
@@ -187,11 +196,7 @@ def configure(conf):
     if not conf.check(lib='nsl', uselib_store="NSL"):
       conf.fatal("Cannot find nsl library")
 
-
-
   conf.sub_config('deps/libeio')
-
-
 
   if conf.env['USE_SHARED_V8']:
     v8_includes = [];
@@ -256,6 +261,9 @@ def configure(conf):
     conf.env.append_value ('CCFLAGS', threadflags)
     conf.env.append_value ('CXXFLAGS', threadflags)
     conf.env.append_value ('LINKFLAGS', threadflags)
+  if sys.platform.startswith("darwin"):
+    # used by platform_darwin_*.cc
+    conf.env.append_value('LINKFLAGS', ['-framework','Carbon'])
 
   conf.env.append_value("CCFLAGS", "-DX_STACKSIZE=%d" % (1024*64))
 
@@ -282,7 +290,7 @@ def configure(conf):
     conf.env.append_value('CXXFLAGS', '-DHAVE_FDATASYNC=0')
 
   # platform
-  platform_def = '-DPLATFORM=' + conf.env['DEST_OS']
+  platform_def = '-DPLATFORM="' + conf.env['DEST_OS'] + '"'
   conf.env.append_value('CCFLAGS', platform_def)
   conf.env.append_value('CXXFLAGS', platform_def)
 
@@ -324,7 +332,12 @@ def v8_cmd(bld, variant):
   else:
     mode = "debug"
 
-  cmd_R = 'python "%s" -j %d -C "%s" -Y "%s" visibility=default mode=%s %s library=static snapshot=on'
+  if bld.env["SNAPSHOT_V8"]:
+    snapshot = "snapshot=on"
+  else:
+    snapshot = ""
+
+  cmd_R = 'python "%s" -j %d -C "%s" -Y "%s" visibility=default mode=%s %s library=static %s'
 
   cmd = cmd_R % ( scons
                 , Options.options.jobs
@@ -332,8 +345,10 @@ def v8_cmd(bld, variant):
                 , v8dir_src
                 , mode
                 , arch
+                , snapshot
                 )
-  return cmd
+  
+  return ("echo '%s' && " % cmd) + cmd
 
 
 def build_v8(bld):
@@ -507,9 +522,9 @@ def build(bld):
     bld.install_files('${PREFIX}/lib', "build/default/libnode.*")
 
   def subflags(program):
-    x = { 'CCFLAGS'   : " ".join(program.env["CCFLAGS"])
-        , 'CPPFLAGS'  : " ".join(program.env["CPPFLAGS"])
-        , 'LIBFLAGS'  : " ".join(program.env["LIBFLAGS"])
+    x = { 'CCFLAGS'   : " ".join(program.env["CCFLAGS"]).replace('"', '\\"')
+        , 'CPPFLAGS'  : " ".join(program.env["CPPFLAGS"]).replace('"', '\\"')
+        , 'LIBFLAGS'  : " ".join(program.env["LIBFLAGS"]).replace('"', '\\"')
         , 'PREFIX'    : program.env["PREFIX"]
         }
     return x

@@ -37,6 +37,7 @@
 #include "top.h"
 #include "utils.h"
 #include "cctest.h"
+#include "parser.h"
 
 static const bool kLogThreading = true;
 
@@ -81,9 +82,20 @@ static void ExpectTrue(const char* code) {
 }
 
 
+static void ExpectFalse(const char* code) {
+  ExpectBoolean(code, false);
+}
+
+
 static void ExpectObject(const char* code, Local<Value> expected) {
   Local<Value> result = CompileRun(code);
   CHECK(result->Equals(expected));
+}
+
+
+static void ExpectUndefined(const char* code) {
+  Local<Value> result = CompileRun(code);
+  CHECK(result->IsUndefined());
 }
 
 
@@ -1194,12 +1206,12 @@ v8::Handle<Value> CheckThisNamedPropertySetter(Local<String> property,
   return v8::Handle<Value>();
 }
 
-v8::Handle<v8::Boolean> CheckThisIndexedPropertyQuery(
+v8::Handle<v8::Integer> CheckThisIndexedPropertyQuery(
     uint32_t index,
     const AccessorInfo& info) {
   ApiTestFuzzer::Fuzz();
   CHECK(info.This()->Equals(bottom));
-  return v8::Handle<v8::Boolean>();
+  return v8::Handle<v8::Integer>();
 }
 
 
@@ -3591,6 +3603,29 @@ THREADED_TEST(ExceptionExtensions) {
   v8::ExtensionConfiguration extensions(1, extension_names);
   v8::Handle<Context> context = Context::New(&extensions);
   CHECK(context.IsEmpty());
+}
+
+
+static const char* kNativeCallInExtensionSource =
+    "function call_runtime_last_index_of(x) {"
+    "  return %StringLastIndexOf(x, 'bob', 10);"
+    "}";
+
+
+static const char* kNativeCallTest =
+    "call_runtime_last_index_of('bobbobboellebobboellebobbob');";
+
+// Test that a native runtime calls are supported in extensions.
+THREADED_TEST(NativeCallInExtensions) {
+  v8::HandleScope handle_scope;
+  v8::RegisterExtension(new Extension("nativecall",
+                                      kNativeCallInExtensionSource));
+  const char* extension_names[] = { "nativecall" };
+  v8::ExtensionConfiguration extensions(1, extension_names);
+  v8::Handle<Context> context = Context::New(&extensions);
+  Context::Scope lock(context);
+  v8::Handle<Value> result = Script::Compile(v8_str(kNativeCallTest))->Run();
+  CHECK_EQ(result, v8::Integer::New(3));
 }
 
 
@@ -8590,15 +8625,12 @@ TEST(PreCompileInvalidPreparseDataError) {
       v8::ScriptData::PreCompile(script, i::StrLength(script));
   CHECK(!sd->HasError());
   // ScriptDataImpl private implementation details
-  const int kUnsignedSize = sizeof(unsigned);
-  const int kHeaderSize = 4;
-  const int kFunctionEntrySize = 4;
+  const int kHeaderSize = i::ScriptDataImpl::kHeaderSize;
+  const int kFunctionEntrySize = i::FunctionEntry::kSize;
   const int kFunctionEntryStartOffset = 0;
   const int kFunctionEntryEndOffset = 1;
   unsigned* sd_data =
       reinterpret_cast<unsigned*>(const_cast<char*>(sd->Data()));
-  CHECK_EQ(sd->Length(),
-           (kHeaderSize + 2 * kFunctionEntrySize) * kUnsignedSize);
 
   // Overwrite function bar's end position with 0.
   sd_data[kHeaderSize + 1 * kFunctionEntrySize + kFunctionEntryEndOffset] = 0;
@@ -8614,6 +8646,8 @@ TEST(PreCompileInvalidPreparseDataError) {
   try_catch.Reset();
   // Overwrite function bar's start position with 200.  The function entry
   // will not be found when searching for it by position.
+  sd = v8::ScriptData::PreCompile(script, i::StrLength(script));
+  sd_data = reinterpret_cast<unsigned*>(const_cast<char*>(sd->Data()));
   sd_data[kHeaderSize + 1 * kFunctionEntrySize + kFunctionEntryStartOffset] =
       200;
   compiled_script = Script::New(source, NULL, sd);
@@ -9192,6 +9226,7 @@ class RegExpStringModificationTest {
            morphs_ < kMaxModifications) {
       int morphs_before = morphs_;
       {
+        v8::HandleScope scope;
         // Match 15-30 "a"'s against 14 and a "b".
         const char* c_source =
             "/a?a?a?a?a?a?a?a?a?a?a?a?a?a?aaaaaaaaaaaaaaaa/"
@@ -11186,4 +11221,90 @@ THREADED_TEST(TwoByteStringInAsciiCons) {
 
   reresult = CompileRun("str2.charCodeAt(2);");
   CHECK_EQ(static_cast<int32_t>('e'), reresult->Int32Value());
+}
+
+
+// Failed access check callback that performs a GC on each invocation.
+void FailedAccessCheckCallbackGC(Local<v8::Object> target,
+                                 v8::AccessType type,
+                                 Local<v8::Value> data) {
+  i::Heap::CollectAllGarbage(true);
+}
+
+
+TEST(GCInFailedAccessCheckCallback) {
+  // Install a failed access check callback that performs a GC on each
+  // invocation. Then force the callback to be called from va
+
+  v8::V8::Initialize();
+  v8::V8::SetFailedAccessCheckCallbackFunction(&FailedAccessCheckCallbackGC);
+
+  v8::HandleScope scope;
+
+  // Create an ObjectTemplate for global objects and install access
+  // check callbacks that will block access.
+  v8::Handle<v8::ObjectTemplate> global_template = v8::ObjectTemplate::New();
+  global_template->SetAccessCheckCallbacks(NamedGetAccessBlocker,
+                                           IndexedGetAccessBlocker,
+                                           v8::Handle<v8::Value>(),
+                                           false);
+
+  // Create a context and set an x property on it's global object.
+  LocalContext context0(NULL, global_template);
+  context0->Global()->Set(v8_str("x"), v8_num(42));
+  v8::Handle<v8::Object> global0 = context0->Global();
+
+  // Create a context with a different security token so that the
+  // failed access check callback will be called on each access.
+  LocalContext context1(NULL, global_template);
+  context1->Global()->Set(v8_str("other"), global0);
+
+  // Get property with failed access check.
+  ExpectUndefined("other.x");
+
+  // Get element with failed access check.
+  ExpectUndefined("other[0]");
+
+  // Set property with failed access check.
+  v8::Handle<v8::Value> result = CompileRun("other.x = new Object()");
+  CHECK(result->IsObject());
+
+  // Set element with failed access check.
+  result = CompileRun("other[0] = new Object()");
+  CHECK(result->IsObject());
+
+  // Get property attribute with failed access check.
+  ExpectFalse("\'x\' in other");
+
+  // Get property attribute for element with failed access check.
+  ExpectFalse("0 in other");
+
+  // Delete property.
+  ExpectFalse("delete other.x");
+
+  // Delete element.
+  CHECK_EQ(false, global0->Delete(0));
+
+  // DefineAccessor.
+  CHECK_EQ(false,
+           global0->SetAccessor(v8_str("x"), GetXValue, NULL, v8_str("x")));
+
+  // Define JavaScript accessor.
+  ExpectUndefined("Object.prototype.__defineGetter__.call("
+                  "    other, \'x\', function() { return 42; })");
+
+  // LookupAccessor.
+  ExpectUndefined("Object.prototype.__lookupGetter__.call("
+                  "    other, \'x\')");
+
+  // HasLocalElement.
+  ExpectFalse("Object.prototype.hasOwnProperty.call(other, \'0\')");
+
+  CHECK_EQ(false, global0->HasRealIndexedProperty(0));
+  CHECK_EQ(false, global0->HasRealNamedProperty(v8_str("x")));
+  CHECK_EQ(false, global0->HasRealNamedCallbackProperty(v8_str("x")));
+
+  // Reset the failed access check callback so it does not influence
+  // the other tests.
+  v8::V8::SetFailedAccessCheckCallbackFunction(NULL);
 }

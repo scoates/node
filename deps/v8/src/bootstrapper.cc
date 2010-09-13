@@ -36,6 +36,7 @@
 #include "global-handles.h"
 #include "macro-assembler.h"
 #include "natives.h"
+#include "objects-visiting.h"
 #include "snapshot.h"
 #include "stub-cache.h"
 
@@ -56,7 +57,7 @@ class SourceCodeCache BASE_EMBEDDED {
   }
 
   void Iterate(ObjectVisitor* v) {
-    v->VisitPointer(BitCast<Object**, FixedArray**>(&cache_));
+    v->VisitPointer(BitCast<Object**>(&cache_));
   }
 
 
@@ -231,6 +232,7 @@ class Genesis BASE_EMBEDDED {
   bool InstallNatives();
   void InstallCustomCallGenerators();
   void InstallJSFunctionResultCaches();
+  void InitializeNormalizedMapCaches();
   // Used both for deserialized and from-scratch contexts to add the extensions
   // provided.
   static bool InstallExtensions(Handle<Context> global_context,
@@ -470,6 +472,7 @@ Handle<JSFunction> Genesis::CreateEmptyFunction() {
   Handle<Code> code =
       Handle<Code>(Builtins::builtin(Builtins::EmptyFunction));
   empty_function->set_code(*code);
+  empty_function->shared()->set_code(*code);
   Handle<String> source = Factory::NewStringFromAscii(CStrVector("() {}"));
   Handle<Script> script = Factory::NewScript(source);
   script->set_type(Smi::FromInt(Script::TYPE_NATIVE));
@@ -717,6 +720,8 @@ void Genesis::InitializeGlobal(Handle<GlobalObject> inner_global,
         InstallFunction(global, "String", JS_VALUE_TYPE, JSValue::kSize,
                         Top::initial_object_prototype(), Builtins::Illegal,
                         true);
+    string_fun->shared()->set_construct_stub(
+        Builtins::builtin(Builtins::StringConstructCode));
     global_context()->set_string_function(*string_fun);
     // Add 'length' property to strings.
     Handle<DescriptorArray> string_descriptors =
@@ -812,9 +817,7 @@ void Genesis::InitializeGlobal(Handle<GlobalObject> inner_global,
     initial_map->set_instance_size(
         initial_map->instance_size() + 5 * kPointerSize);
     initial_map->set_instance_descriptors(*descriptors);
-    initial_map->set_scavenger(
-        Heap::GetScavenger(initial_map->instance_type(),
-                           initial_map->instance_size()));
+    initial_map->set_visitor_id(StaticVisitorBase::GetVisitorId(*initial_map));
   }
 
   {  // -- J S O N
@@ -1234,6 +1237,14 @@ bool Genesis::InstallNatives() {
 
   InstallNativeFunctions();
 
+  // Store the map for the string prototype after the natives has been compiled
+  // and the String function has been setup.
+  Handle<JSFunction> string_function(global_context()->string_function());
+  ASSERT(JSObject::cast(
+      string_function->initial_map()->prototype())->HasFastProperties());
+  global_context()->set_string_function_prototype_map(
+      HeapObject::cast(string_function->initial_map()->prototype())->map());
+
   InstallCustomCallGenerators();
 
   // Install Function.prototype.call and apply.
@@ -1392,6 +1403,13 @@ void Genesis::InstallJSFunctionResultCaches() {
 }
 
 
+void Genesis::InitializeNormalizedMapCaches() {
+  Handle<FixedArray> array(
+      Factory::NewFixedArray(NormalizedMapCache::kEntries, TENURED));
+  global_context()->set_normalized_map_cache(NormalizedMapCache::cast(*array));
+}
+
+
 int BootstrapperActive::nesting_ = 0;
 
 
@@ -1545,6 +1563,8 @@ bool Genesis::InstallJSBuiltins(Handle<JSBuiltinsObject> builtins) {
     Handle<SharedFunctionInfo> shared
         = Handle<SharedFunctionInfo>(function->shared());
     if (!EnsureCompiled(shared, CLEAR_EXCEPTION)) return false;
+    // Set the code object on the function object.
+    function->set_code(function->shared()->code());
     builtins->set_javascript_builtin_code(id, shared->code());
   }
   return true;
@@ -1758,6 +1778,7 @@ Genesis::Genesis(Handle<Object> global_object,
     HookUpGlobalProxy(inner_global, global_proxy);
     InitializeGlobal(inner_global, empty_function);
     InstallJSFunctionResultCaches();
+    InitializeNormalizedMapCaches();
     if (!InstallNatives()) return;
 
     MakeFunctionInstancePrototypeWritable();
