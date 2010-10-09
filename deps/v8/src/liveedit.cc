@@ -29,13 +29,15 @@
 #include "v8.h"
 
 #include "liveedit.h"
+
 #include "compiler.h"
-#include "oprofile-agent.h"
-#include "scopes.h"
-#include "scopeinfo.h"
-#include "global-handles.h"
 #include "debug.h"
+#include "global-handles.h"
 #include "memory.h"
+#include "oprofile-agent.h"
+#include "parser.h"
+#include "scopeinfo.h"
+#include "scopes.h"
 
 namespace v8 {
 namespace internal {
@@ -408,17 +410,18 @@ static void CompileScriptForTracker(Handle<Script> script) {
 
   // Build AST.
   ScriptDataImpl* pre_data = NULL;
-  FunctionLiteral* lit = MakeAST(is_global, script, extension, pre_data);
+  EagerCompilationInfo info(script, is_eval);
+  FunctionLiteral* lit =
+      Parser::MakeAST(is_global, script, extension, pre_data);
 
   // Check for parse errors.
   if (lit == NULL) {
     ASSERT(Top::has_pending_exception());
     return;
   }
+  info.set_function(lit);
 
   // Compile the code.
-  CompilationInfo info(lit, script, is_eval);
-
   LiveEditFunctionTracker tracker(lit);
   Handle<Code> code = MakeCodeForLiveEdit(&info);
 
@@ -617,65 +620,6 @@ class FunctionInfoListener {
     current_parent_index_ = info.GetParentIndex();
   }
 
-// TODO(LiveEdit): Move private method below.
-//     This private section was created here to avoid moving the function
-//      to keep already complex diff simpler.
- private:
-  Object* SerializeFunctionScope(Scope* scope) {
-    HandleScope handle_scope;
-
-    Handle<JSArray> scope_info_list = Factory::NewJSArray(10);
-    int scope_info_length = 0;
-
-    // Saves some description of scope. It stores name and indexes of
-    // variables in the whole scope chain. Null-named slots delimit
-    // scopes of this chain.
-    Scope* outer_scope = scope->outer_scope();
-    if (outer_scope == NULL) {
-      return Heap::undefined_value();
-    }
-    do {
-      ZoneList<Variable*> list(10);
-      outer_scope->CollectUsedVariables(&list);
-      int j = 0;
-      for (int i = 0; i < list.length(); i++) {
-        Variable* var1 = list[i];
-        Slot* slot = var1->slot();
-        if (slot != NULL && slot->type() == Slot::CONTEXT) {
-          if (j != i) {
-            list[j] = var1;
-          }
-          j++;
-        }
-      }
-
-      // Sort it.
-      for (int k = 1; k < j; k++) {
-        int l = k;
-        for (int m = k + 1; m < j; m++) {
-          if (list[l]->slot()->index() > list[m]->slot()->index()) {
-            l = m;
-          }
-        }
-        list[k] = list[l];
-      }
-      for (int i = 0; i < j; i++) {
-        SetElement(scope_info_list, scope_info_length, list[i]->name());
-        scope_info_length++;
-        SetElement(scope_info_list, scope_info_length,
-                   Handle<Smi>(Smi::FromInt(list[i]->slot()->index())));
-        scope_info_length++;
-      }
-      SetElement(scope_info_list, scope_info_length,
-                 Handle<Object>(Heap::null_value()));
-      scope_info_length++;
-
-      outer_scope = outer_scope->outer_scope();
-    } while (outer_scope != NULL);
-
-    return *scope_info_list;
-  }
-
  public:
   // Saves only function code, because for a script function we
   // may never create a SharedFunctionInfo object.
@@ -701,11 +645,64 @@ class FunctionInfoListener {
     info.SetOuterScopeInfo(scope_info_list);
   }
 
-  Handle<JSArray> GetResult() {
-    return result_;
-  }
+  Handle<JSArray> GetResult() { return result_; }
 
  private:
+  Object* SerializeFunctionScope(Scope* scope) {
+    HandleScope handle_scope;
+
+    Handle<JSArray> scope_info_list = Factory::NewJSArray(10);
+    int scope_info_length = 0;
+
+    // Saves some description of scope. It stores name and indexes of
+    // variables in the whole scope chain. Null-named slots delimit
+    // scopes of this chain.
+    Scope* outer_scope = scope->outer_scope();
+    if (outer_scope == NULL) {
+      return Heap::undefined_value();
+    }
+    do {
+      ZoneList<Variable*> list(10);
+      outer_scope->CollectUsedVariables(&list);
+      int j = 0;
+      for (int i = 0; i < list.length(); i++) {
+        Variable* var1 = list[i];
+        Slot* slot = var1->AsSlot();
+        if (slot != NULL && slot->type() == Slot::CONTEXT) {
+          if (j != i) {
+            list[j] = var1;
+          }
+          j++;
+        }
+      }
+
+      // Sort it.
+      for (int k = 1; k < j; k++) {
+        int l = k;
+        for (int m = k + 1; m < j; m++) {
+          if (list[l]->AsSlot()->index() > list[m]->AsSlot()->index()) {
+            l = m;
+          }
+        }
+        list[k] = list[l];
+      }
+      for (int i = 0; i < j; i++) {
+        SetElement(scope_info_list, scope_info_length, list[i]->name());
+        scope_info_length++;
+        SetElement(scope_info_list, scope_info_length,
+                   Handle<Smi>(Smi::FromInt(list[i]->AsSlot()->index())));
+        scope_info_length++;
+      }
+      SetElement(scope_info_list, scope_info_length,
+                 Handle<Object>(Heap::null_value()));
+      scope_info_length++;
+
+      outer_scope = outer_scope->outer_scope();
+    } while (outer_scope != NULL);
+
+    return *scope_info_list;
+  }
+
   Handle<JSArray> result_;
   int len_;
   int current_parent_index_;

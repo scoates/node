@@ -175,7 +175,7 @@ into `buf2`, starting at the 8th byte in `buf2`.
     // !!!!!!!!qrst!!!!!!!!!!!!!
     
 
-### buffer.slice(start, end)
+### buffer.slice(start, end=buffer.length)
 
 Returns a new buffer which references the
 same memory as the old, but offset and cropped by the `start` and `end`
@@ -1448,19 +1448,6 @@ See pwrite(2).
 The callback will be given two arguments `(err, written)` where `written`
 specifies how many _bytes_ were written.
 
-### fs.write(fd, str, position, encoding='utf8', [callback])
-
-Write the entire string `str` using the given `encoding` to the file specified
-by `fd`.
-
-`position` refers to the offset from the beginning of the file where this data
-should be written. If `position` is `null`, the data will be written at the
-current position.
-See pwrite(2).
-
-The callback will be given two arguments `(err, written)` where `written`
-specifies how many _bytes_ were written.
-
 ### fs.writeSync(fd, buffer, offset, length, position)
 
 Synchronous version of buffer-based `fs.write()`. Returns the number of bytes written.
@@ -1483,19 +1470,6 @@ Read data from the file specified by `fd`.
 If `position` is `null`, data will be read from the current file position.
 
 The callback is given the two arguments, `(err, bytesRead)`.
-
-### fs.read(fd, length, position, encoding, [callback])
-
-Read data from the file specified by `fd`.
-
-`length` is an integer specifying the number of bytes to read.
-
-`position` is an integer specifying where to begin reading from in the file.
-If `position` is `null`, data will be read from the current file position.
-
-`encoding` is the desired encoding of the string of data read in from `fd`.
-
-The callback is given the three arguments, `(err, str, bytesRead)`.
 
 ### fs.readSync(fd, buffer, offset, length, position)
 
@@ -1685,6 +1659,22 @@ This is an `EventEmitter` with the following events:
 Emitted each time there is request. Note that there may be multiple requests
 per connection (in the case of keep-alive connections).
 
+### Event: 'checkContinue'
+
+`function (request, response) {}`
+
+Emitted each time a request with an http Expect: 100-continue is received.
+If this event isn't listened for, the server will automatically respond
+with a 100 Continue as appropriate.
+
+Handling this event involves calling `response.writeContinue` if the client
+should continue to send the request body, or generating an appropriate HTTP
+response (e.g., 400 Bad Request) if the client should not continue to send the
+request body.
+
+Note that when this event is emitted and handled, the `request` event will
+not be emitted.
+
 ### Event: 'upgrade'
 
 `function (request, socket, head)`
@@ -1817,6 +1807,10 @@ you can use the `require('querystring').parse` function, or pass
 
 Read only.
 
+### request.trailers
+
+Read only; HTTP trailers (if present). Only populated after the 'end' event.
+
 ### request.httpVersion
 
 The HTTP protocol version as a string. Read only. Examples:
@@ -1856,6 +1850,11 @@ authentication details.
 This object is created internally by a HTTP server--not by the user. It is
 passed as the second parameter to the `'request'` event. It is a `Writable Stream`.
 
+### response.writeContinue()
+
+Sends a HTTP/1.1 100 Continue message to the client, indicating that
+the request body should be sent. See the the `checkContinue` event on
+`Server`.
 
 ### response.writeHead(statusCode, [reasonPhrase], [headers])
 
@@ -1893,6 +1892,24 @@ header information and the first body to the client. The second time
 `response.write()` is called, Node assumes you're going to be streaming
 data, and sends that separately. That is, the response is buffered up to the
 first chunk of body.
+
+### response.addTrailers(headers)
+
+This method adds HTTP trailing headers (a header but at the end of the
+message) to the response. 
+
+Trailers will **only** be emitted if chunked encoding is used for the 
+response; if it is not (e.g., if the request was HTTP/1.0), they will
+be silently discarded.
+
+Note that HTTP requires the `Trailer` header to be sent if you intend to
+emit trailers, with a list of the header fields in its value. E.g.,
+
+    response.writeHead(200, { 'Content-Type': 'text/plain',
+                              'Trailer': 'TraceInfo' });
+    response.write(fileData);
+    response.addTrailers({'Content-MD5': "7895bf4b8828b55ceaf47747b4bca667"});
+    response.end();
 
 
 ### response.end([data], [encoding])
@@ -1940,6 +1957,11 @@ There are a few special headers that should be noted.
 
 * Sending a 'Content-length' header will disable the default chunked encoding.
 
+* Sending an 'Expect' header will immediately send the request headers. 
+  Usually, when sending 'Expect: 100-continue', you should both set a timeout
+  and listen for the `continue` event. See RFC2616 Section 8.2.3 for more
+  information.
+
 
 ### Event: 'upgrade'
 
@@ -1950,6 +1972,15 @@ isn't being listened for, clients receiving an upgrade header will have their
 connections closed.
 
 See the description of the `upgrade` event for `http.Server` for further details.
+
+### Event: 'continue'
+
+`function ()`
+
+Emitted when the server sends a '100 Continue' HTTP response, usually because
+the request contained 'Expect: 100-continue'. This is an instruction that
+the client should send the request body.
+
 
 ### http.createClient(port, host='localhost', secure=false, [credentials])
 
@@ -2101,6 +2132,10 @@ Also `response.httpVersionMajor` is the first integer and
 
 The response headers object.
 
+### response.trailers
+
+The response trailers object. Only populated after the 'end' event.
+
 ### response.setEncoding(encoding=null)
 
 Set the encoding for the response body. Either `'utf8'`, `'ascii'`, or `'base64'`.
@@ -2208,6 +2243,25 @@ Set this property to reject connections when the server's connection count gets 
 ### server.connections
 
 The number of concurrent connections on the server.
+
+
+## net.isIP
+
+### net.isIP(input)
+
+Tests if input is an IP address. Returns 0 for invalid strings,
+returns 4 for IP version 4 addresses, and returns 6 for IP version 6 addresses.
+
+
+### net.isIPv4(input)
+
+Returns true if input is a version 4 IP address, otherwise returns false.
+
+
+### net.isIPv6(input)
+
+Returns true if input is a version 6 IP address, otherwise returns false.
+
 
 
 
@@ -2988,9 +3042,10 @@ Take a base URL, and a href URL, and resolve them as a browser would for an anch
 
 This module provides utilities for dealing with query strings.  It provides the following methods:
 
-### querystring.stringify(obj, sep='&', eq='=', munge=true)
+### querystring.stringify(obj, sep='&', eq='=')
 
 Serialize an object to a query string.  Optionally override the default separator and assignment characters.
+
 Example:
 
     querystring.stringify({foo: 'bar'})
@@ -3001,39 +3056,17 @@ Example:
     // returns
     'foo:bar;baz:bob'
 
-By default, this function will perform PHP/Rails-style parameter munging for arrays and objects used as
-values within `obj`.
-Example:
-
-    querystring.stringify({foo: ['bar', 'baz', 'boz']})
-    // returns
-    'foo%5B%5D=bar&foo%5B%5D=baz&foo%5B%5D=boz'
-
-    querystring.stringify({foo: {bar: 'baz'}})
-    // returns
-    'foo%5Bbar%5D=baz'
-
-If you wish to disable the array munging (e.g. when generating parameters for a Java servlet), you
-can set the `munge` argument to `false`.
-Example:
-
-    querystring.stringify({foo: ['bar', 'baz', 'boz']}, '&', '=', false)
-    // returns
-    'foo=bar&foo=baz&foo=boz'
-
-Note that when `munge` is `false`, parameter names with object values will still be munged.
-
 ### querystring.parse(str, sep='&', eq='=')
 
 Deserialize a query string to an object.  Optionally override the default separator and assignment characters.
+
+Example:
 
     querystring.parse('a=b&b=c')
     // returns
     { 'a': 'b'
     , 'b': 'c'
     }
-
-This function can parse both munged and unmunged query strings (see `stringify` for details).
 
 ### querystring.escape
 
@@ -3209,6 +3242,10 @@ a directory.
 `require.paths` can be modified at runtime by simply unshifting new
 paths onto it, or at startup with the `NODE_PATH` environmental
 variable (which should be a list of paths, colon separated).
+
+The second time `require('foo')` is called, it is not loaded again from
+disk. It looks in the `require.cache` object to see if it has been loaded
+before.
 
 
 ## Addons

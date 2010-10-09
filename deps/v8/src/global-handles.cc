@@ -372,13 +372,14 @@ void GlobalHandles::IdentifyWeakHandles(WeakSlotCallback f) {
 
 int post_gc_processing_count = 0;
 
-void GlobalHandles::PostGarbageCollectionProcessing() {
+bool GlobalHandles::PostGarbageCollectionProcessing() {
   // Process weak global handle callbacks. This must be done after the
   // GC is completely done, because the callbacks may invoke arbitrary
   // API functions.
   // At the same time deallocate all DESTROYED nodes.
   ASSERT(Heap::gc_state() == Heap::NOT_IN_GC);
   const int initial_post_gc_processing_count = ++post_gc_processing_count;
+  bool weak_callback_invoked = false;
   Node** p = &head_;
   while (*p != NULL) {
     if ((*p)->PostGarbageCollectionProcessing()) {
@@ -389,6 +390,7 @@ void GlobalHandles::PostGarbageCollectionProcessing() {
         // restart the processing).
         break;
       }
+      weak_callback_invoked = true;
     }
     if ((*p)->state_ == Node::DESTROYED) {
       // Delete the link.
@@ -407,6 +409,7 @@ void GlobalHandles::PostGarbageCollectionProcessing() {
   if (first_deallocated()) {
     first_deallocated()->set_next(head());
   }
+  return weak_callback_invoked;
 }
 
 
@@ -483,7 +486,7 @@ void GlobalHandles::PrintStats() {
   }
 
   PrintF("Global Handle Statistics:\n");
-  PrintF("  allocated memory = %dB\n", sizeof(Node) * total);
+  PrintF("  allocated memory = %" V8_PTR_PREFIX "dB\n", sizeof(Node) * total);
   PrintF("  # weak       = %d\n", weak);
   PrintF("  # pending    = %d\n", pending);
   PrintF("  # near_death = %d\n", near_death);
@@ -494,8 +497,10 @@ void GlobalHandles::PrintStats() {
 void GlobalHandles::Print() {
   PrintF("Global handles:\n");
   for (Node* current = head_; current != NULL; current = current->next()) {
-    PrintF("  handle %p to %p (weak=%d)\n", current->handle().location(),
-           *current->handle(), current->state_ == Node::WEAK);
+    PrintF("  handle %p to %p (weak=%d)\n",
+           reinterpret_cast<void*>(current->handle().location()),
+           reinterpret_cast<void*>(*current->handle()),
+           current->state_ == Node::WEAK);
   }
 }
 

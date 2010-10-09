@@ -1,5 +1,5 @@
 common = require("../common");
-assert = common.assert
+assert = common.assert;
 
 var sys=require('sys');
 var net=require('net');
@@ -9,7 +9,12 @@ var crypto=require('crypto');
 var keyPem = fs.readFileSync(common.fixturesDir + "/cert.pem");
 var certPem = fs.readFileSync(common.fixturesDir + "/cert.pem");
 
-var credentials = crypto.createCredentials({key:keyPem, cert:certPem});
+try{
+  var credentials = crypto.createCredentials({key:keyPem, cert:certPem});
+} catch (e) {
+  console.log("Not compiled with OPENSSL support.");
+  process.exit();
+}
 var i = 0;
 var server = net.createServer(function (connection) {
   connection.setSecure(credentials);

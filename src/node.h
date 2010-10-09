@@ -17,6 +17,8 @@
 
 namespace node {
 
+int Start (int argc, char *argv[]);
+
 #define NODE_PSYMBOL(s) Persistent<String>::New(String::NewSymbol(s))
 
 /* Converts a unixtime to V8 Date */
@@ -61,6 +63,15 @@ ssize_t DecodeWrite(char *buf,
                     enum encoding encoding = BINARY);
 
 v8::Local<v8::Object> BuildStatsObject(struct stat * s);
+
+
+/**
+ * Call this when your constructor is invoked as a regular function, e.g. Buffer(10) instead of new Buffer(10).
+ * @param constructorTemplate Constructor template to instantiate from.
+ * @param args The arguments object passed to your constructor.
+ * @see v8::Arguments::IsConstructCall
+ */
+v8::Handle<v8::Value> FromConstructorTemplate(v8::Persistent<v8::FunctionTemplate>& constructorTemplate, const v8::Arguments& args);
 
 
 static inline v8::Persistent<v8::Function>* cb_persist(
